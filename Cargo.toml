@@ -1,0 +1,50 @@
+[package]
+name = "crabedb"
+version = "0.1.0"
+authors = ["Gabriel Mougard <gabriel.mougard@gmail.com>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+# Extremely fast Hash algorithm, running at RAM speed limits.
+twox-hash = "1.6.0"
+# CLI parsing
+clap = "2.33.0"
+# Basic logging
+log = "0.4"
+# gRPC client/server logic
+tonic = {versiojn = "0.4", features = ["tls"] }
+prost = "0.7"
+futures-core = "0.3"
+futures-util = "0.3"
+tokio = { version = "1.0", features = ["rt-multi-thread", "macros", "sync", "time"] }
+tokio-stream = "0.1"
+async-stream = "0.2"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+rand = "0.7"
+# For the concurrent hash map implementation
+parking_lot = { version = "0.11", features = ["owning_ref"] }
+owning_ref = "0.4"
+# For the compaction library
+byteorder = "1.2"
+fs2 = "~0.4.1"
+lazy_static = "1.4.0"
+regex = "~0.2.1"
+time = "~0.1.37"
+
+[build-dependencies]
+tonic-build = "0.4"
+
+[lib]
+name = "crabedb"
+path = "src/crabedb/lib.rs"
+
+[[bin]]
+name = "crabedb-server"
+path = "src/bin/server.rs"
+
+[[bin]]
+name = "crabedb-client"
+path = "src/bin/client.rs"
