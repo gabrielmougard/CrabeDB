@@ -7,6 +7,7 @@ edition = "2018"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+env_logger = "0.8.3"
 # Extremely fast Hash algorithm, running at RAM speed limits.
 twox-hash = "1.6.0"
 # CLI parsing

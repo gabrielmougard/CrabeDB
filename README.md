@@ -2,6 +2,7 @@
 
 ![Crab](doc/crab.jpeg)
 The **Norwegian Monster Crab** for you dear rustaceans !
+
 ## Docker
 
 * For the client :

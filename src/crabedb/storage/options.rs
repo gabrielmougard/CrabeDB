@@ -32,7 +32,7 @@ impl Default for StorageOptions {
         StorageOptions {
             create: true,
             sync: SyncOptions::Frequency(2000),
-            max_file_size: 2 * 1024 * 1024 * 1024, // 2MBytes
+            max_file_size: 1024 * 1024 * 1024, // 1GB
             file_chunk_queue_size: 2048,
             compaction: true,
             compaction_check_frequency: 3600,
