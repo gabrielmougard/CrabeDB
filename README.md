@@ -1,7 +1,7 @@
-# CrabeDB - A simple, yet fast, KV store written in Rust.
+# CrabeDB - A simple, yet mighty, KV store written in Rust.
 
-(TODO)
-
+![Crab](doc/crab.jpeg)
+The **Norwegian Monster Crab** for you dear rustaceans !
 ## Docker
 
 * For the client :
