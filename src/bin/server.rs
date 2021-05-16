@@ -329,7 +329,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .open(dump_path)?;
 
     let kv_store_api = KvStoreAPI { db };
-    let addr = format!("[::1]:{}", port).parse().unwrap();
+    let addr = format!("127.0.0.1:{}", port).parse().unwrap();
     info!("CrabeDB Server listening on {}", addr);
 
     Server::builder()

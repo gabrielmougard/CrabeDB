@@ -69,12 +69,13 @@ impl From<io::Error> for Error {
 }
 
 impl From<Error> for Status {
-    fn from(err: Error) -> Self {
+    fn from(_: Error) -> Self {
         Status::new(Code::Internal, "CrabeDB internal error.")
     }
 }
 
 impl error::Error for Error {
+    #![allow(deprecated)]
     fn description(&self) -> &str {
         match *self {
             Error::Io(ref err) => err.description(),

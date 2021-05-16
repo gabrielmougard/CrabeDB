@@ -8,7 +8,7 @@ pub mod protobuf {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-
+    env_logger::init();
     let matches = App::new("
     .d8888b.                  888               8888888b.  888888b.
     d88P  Y88b                 888               888  'Y88b 888  '88b
@@ -71,7 +71,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let node_addr = matches.value_of("node").unwrap_or("127.0.0.1:5000");
     let mut tx = KvstoreClient::connect(format!("http://{}", node_addr)).await?;
 
-
     match matches.subcommand() {
         ("get", Some(get_subcommand)) => {
             match get_subcommand.value_of("key") {
@@ -80,19 +79,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         key: String::from(key),
                     });
                     let response = tx.kv_get_call(request).await?;
-                    println!("RESPONSE={:?}", response);
-                    // match tx.kv_get_call(&key) {
-                    //     Ok(ack) => {
-                    //         if ack.get_exist() {
-                    //             info!("Result for key {0} : {1}", key, ack.get_value());
-                    //         } else {
-                    //             warn!("No result exists for key {0}", key);
-                    //         }
-                    //     },
-                    //     Err(error) => {
-                    //         warn!("Communication error : {0}", error);
-                    //     }
-                    // }
+                    if response.get_ref().exist {
+                        info!("Retrieved value: {:?} for Key: {:?}", response.get_ref().value, key);
+                    } else {
+                        warn!("Key: {:?} doesn't exist.", key);
+                    }
                 },
                 None => {}
             }
@@ -107,19 +98,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 value: String::from(value),
                             });
                             let response = tx.kv_set_call(request).await?;
-                            println!("RESPONSE={:?}", response);
-                            // match tx.kv_set_call(&key, &value) {
-                            //     Ok(ack) => {
-                            //         if ack.get_inserted() {
-                            //             info!("The pair (Key {0} , Value : {1}) has been successfully inserted.", key, value);
-                            //         } else if ack.get_updated(){
-                            //             info!("The Value : {0} has been successfully updated for Key : {1}", value, key);
-                            //         }
-                            //     },
-                            //     Err(error) => {
-                            //         warn!("Communication error : {0}", error);
-                            //     }
-                            // }
+                            if response.get_ref().success {
+                                info!("Key: {:?} has been successfully set with Value: {:?}", key, value);
+                            } else {
+                                warn!("Key: {:?} couldn't be set.", key);
+                            }
                         },
                         None => {}
                     }
@@ -134,19 +117,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         key: String::from(key),
                     });
                     let response = tx.kv_remove_call(request).await?;
-                    println!("RESPONSE={:?}", response);
-                    // match tx.kv_get_call(&key) {
-                    //     Ok(ack) => {
-                    //         if ack.get_exist() {
-                    //             info!("Result for key {0} : {1}", key, ack.get_value());
-                    //         } else {
-                    //             warn!("No result exists for key {0}", key);
-                    //         }
-                    //     },
-                    //     Err(error) => {
-                    //         warn!("Communication error : {0}", error);
-                    //     }
-                    // }
+                    if response.get_ref().success {
+                        info!("Key: {:?} has been successfully removed with its value.", key);
+                    } else {
+                        warn!("Key: {:?} couldn't be removed.", key);
+                    }
                 },
                 None => {}
             }
