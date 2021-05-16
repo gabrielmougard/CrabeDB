@@ -117,10 +117,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .version("0.1.0")
     .author("Gabriel Mougard <gabriel.mougard@gmail.com>")
     .about("gRPC server for the CrabeDB store")
-    .arg(Arg::with_name("port")
-        .short("p")
-        .long("port")
-        .help("Port number of the running server. (default: 5000)")
+    .arg(Arg::with_name("address")
+        .short("a")
+        .long("address")
+        .help("IP/DNS of the server host (default: 0.0.0.0:5000)")
         .takes_value(true)
     )
     .arg(Arg::with_name("dump")
@@ -186,20 +186,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )
     .get_matches();
 
-    let port = match matches.value_of("port") {
-        Some(p) => {
-            match p.parse::<u32>() {
-                Ok(arg) => {
-                    if arg <= 65535 {
-                        arg
-                    } else {
-                        5000
-                    }
-                },
-                Err(_) => 5000,
+    let addr = match matches.value_of("address") {
+        Some(target) => {
+            let re_ip = Regex::new(r"^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?):[0-9]{1,5}$").unwrap();
+            if re_ip.is_match(target) {
+                target
+            } else {
+                "127.0.0.1:5000"
             }
         },
-        None => 5000,
+        None => "127.0.0.1:5000",
     };
     let dump_path = match matches.value_of("dump") {
         Some(path) => path,
@@ -329,12 +325,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .open(dump_path)?;
 
     let kv_store_api = KvStoreAPI { db };
-    let addr = format!("127.0.0.1:{}", port).parse().unwrap();
     info!("CrabeDB Server listening on {}", addr);
-
     Server::builder()
         .add_service(KvstoreServer::new(kv_store_api))
-        .serve(addr)
+        .serve(addr.parse().unwrap())
         .await?;
 
     Ok(())
