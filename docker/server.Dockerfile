@@ -23,5 +23,6 @@ USER crabedb-server
 
 ENV RUST_LOG debug
 ENV params -h
+EXPOSE 5000
 
 CMD ["sh", "-c", "crabedb-server ${params}"]
