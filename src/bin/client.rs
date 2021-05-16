@@ -5,6 +5,7 @@ use protobuf::kvstore_client::KvstoreClient;
 pub mod protobuf {
     tonic::include_proto!("kvstore");
 }
+use regex::Regex;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -68,7 +69,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )
     .get_matches();
 
-    let node_addr = matches.value_of("node").unwrap_or("127.0.0.1:5000");
+    let node_addr = match matches.value_of("node") {
+        Some(target) => {
+            let re_ip = Regex::new(r"(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.){3}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5]):([0-9]{1,})$").unwrap();
+            let re_valid_dns = Regex::new(r"(([a-zA-Z]|[a-zA-Z][a-zA-Z0-9\-]*[a-zA-Z0-9])\.)*([A-Za-z]|[A-Za-z][A-Za-z0-9\-]*[A-Za-z0-9])$").unwrap();
+            match re_ip.captures(target) {
+                Some(cap) => cap.get(1).unwrap().as_str(),
+                None => {
+                    match re_valid_dns.captures(target) {
+                        Some(cap) => cap.get(1).unwrap().as_str(),
+                        None => "127.0.0.1:5000",
+                    }
+                },
+            }
+        },
+        None => "127.0.0.1:5000",
+    };
     let mut tx = KvstoreClient::connect(format!("http://{}", node_addr)).await?;
 
     match matches.subcommand() {
