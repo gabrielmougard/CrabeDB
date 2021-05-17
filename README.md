@@ -1,7 +1,26 @@
 # CrabeDB - A simple, yet mighty, KV store written in Rust.
 
 ![Crab](doc/crab.jpeg)
-The **Norwegian Monster Crab** for you dear rustaceans !
+This is the **Norwegian Monster Crab** for you dear rustaceans !
+
+This key-value store is meant to be fast and reliable from a memory leakage point of view but also for data recovery. It implements the following features :
+
+* Client side :
+    * get, set, remove operations.
+    * gRPC network API for a blazingly-fast request/response transfer time.
+
+* Server side :
+    * Tokio runtime for bare-metal network performance.
+    * Concurrent access to memory via locking mechanism.
+    * Disk synchronization using Log-Structured-Merging (LSM)
+    * Data compaction in the background (if files are large enough).
+    * [WIP] Telemetry interface for Prometheus.
+
+
+Now, let's see the architecture :
+
+
+# Build guide
 
 ## Option 1 : Build with Docker
 (The docker images are not optimized in size, due to lack of time... But using a builder layer + alpine:latest should offer a size around 30MB for both images.)
