@@ -11,7 +11,6 @@ use super::slot::{MAX_KEY_SIZE, MAX_VALUE_SIZE};
 
 #[derive(Debug)]
 pub enum Error {
-    /// IO error.
     Io(io::Error),
     InvalidFileId(u32),
     InvalidKeySize(usize),
