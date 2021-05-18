@@ -322,7 +322,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .dead_bytes_trigger(dead_bytes_trigger)
         .dead_bytes_threshold(dead_bytes_threshold)
         .small_file_threshold(small_file_threshold)
-        .open(dump_path)?;
+        .load(dump_path)?;
 
     let kv_store_api = KvStoreAPI { db };
     info!("CrabeDB Server listening on {}", addr);

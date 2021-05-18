@@ -3,11 +3,8 @@ use super::error::Result;
 
 #[derive(Clone, PartialEq)]
 pub enum SyncOptions {
-    // Synchronize writes in the background every `n` milliseconds.
     Frequency(usize),
-    // Never synchronize writes.
     Never,
-    // Always synchronize writes.
     Always,
 }
 
@@ -111,7 +108,7 @@ impl StorageOptions {
         self
     }
 
-    pub fn open(&self, path: &str) -> Result<CrabeDB> {
-        CrabeDB::open(path, self.clone())
+    pub fn load(&self, path: &str) -> Result<CrabeDB> {
+        CrabeDB::load(path, self.clone())
     }
 }

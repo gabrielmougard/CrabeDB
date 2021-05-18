@@ -12,8 +12,8 @@ use twox_hash::RandomXxHashBuilder32;
 use super::error::{Error, Result};
 use super::xxhash::XxHash32;
 
-const ENTRY_STATIC_SIZE: usize = 18; // checksum(4) + seq(8) + key_size(2) + value_size(4)
-const ENTRY_TOMBSTONE: u32 = !0;
+const LOG_STATIC_SIZE: usize = 18; // checksum(4) + seq(8) + key_size(2) + value_size(4)
+const LOG_TOMBSTONE: u32 = !0;
 pub const MAX_VALUE_SIZE: u32 = !0 - 1;
 pub const MAX_KEY_SIZE: u16 = !0;
 
@@ -123,19 +123,19 @@ impl MemIdx {
         })
     }
 
-    pub fn update(&mut self, hint: CowHint, file_id: u32) {
+    pub fn update(&mut self, ch: CompactionHint, file_id: u32) {
         let mem_idx_entry = MemIdxEntry {
-            pos: hint.entry_pos,
-            seq: hint.seq,
-            size: hint.entry_size(),
+            pos: ch.log_pos,
+            seq: ch.seq,
+            size: ch.log_size(),
             file_id: file_id,
         };
 
-        match self.mem.entry(hint.key.to_vec()) {
+        match self.mem.entry(ch.key.to_vec()) {
             HashMapEntry::Occupied(mut occupied) => {
-                if occupied.get().seq <= hint.seq {
+                if occupied.get().seq <= ch.seq {
                     self.compaction_analysis.remove(occupied.get());
-                    if hint.deleted {
+                    if ch.deleted {
                         occupied.remove();
                     } else {
                         self.compaction_analysis.add(&mem_idx_entry);
@@ -147,7 +147,7 @@ impl MemIdx {
                 }
             }
             HashMapEntry::Vacant(e) => {
-                if !hint.deleted {
+                if !ch.deleted {
                     self.compaction_analysis.add(&mem_idx_entry);
                     e.insert(mem_idx_entry);
                 }
@@ -161,15 +161,15 @@ impl MemIdx {
 }
 
 #[derive(Eq, PartialEq)]
-pub struct CowEntry<'a> {
+pub struct Log<'a> {
     pub key: Cow<'a, [u8]>,
     pub value: Cow<'a, [u8]>,
     pub seq: u64,
     pub deleted: bool,
 }
 
-impl<'a> CowEntry<'a> {
-    pub fn new<K, V>(seq: u64, key: K, value: V) -> Result<CowEntry<'a>>
+impl<'a> Log<'a> {
+    pub fn new<K, V>(seq: u64, key: K, value: V) -> Result<Log<'a>>
     where
         Cow<'a, [u8]>: From<K>,
         Cow<'a, [u8]>: From<V>,
@@ -185,7 +185,7 @@ impl<'a> CowEntry<'a> {
             return Err(Error::InvalidValueSize(v.len()));
         }
 
-        Ok(CowEntry {
+        Ok(Log {
             key: k,
             value: v,
             seq: seq,
@@ -193,11 +193,11 @@ impl<'a> CowEntry<'a> {
         })
     }
 
-    pub fn deleted<K>(seq: u64, key: K) -> CowEntry<'a>
+    pub fn deleted<K>(seq: u64, key: K) -> Log<'a>
     where
         Cow<'a, [u8]>: From<K>,
     {
-        CowEntry {
+        Log {
             key: Cow::from(key),
             value: Cow::Borrowed(&[]),
             seq: seq,
@@ -206,17 +206,17 @@ impl<'a> CowEntry<'a> {
     }
 
     pub fn size(&self) -> u64 {
-        ENTRY_STATIC_SIZE as u64 + self.key.len() as u64 + self.value.len() as u64
+        LOG_STATIC_SIZE as u64 + self.key.len() as u64 + self.value.len() as u64
     }
 
     pub fn write_bytes<W: Write>(&self, writer: &mut W) -> Result<()> {
-        let mut cursor = Cursor::new(Vec::with_capacity(ENTRY_STATIC_SIZE));
+        let mut cursor = Cursor::new(Vec::with_capacity(LOG_STATIC_SIZE));
         cursor.set_position(4);
         cursor.write_u64::<LittleEndian>(self.seq)?;
         cursor.write_u16::<LittleEndian>(self.key.len() as u16)?;
 
         if self.deleted {
-            cursor.write_u32::<LittleEndian>(ENTRY_TOMBSTONE)?;
+            cursor.write_u32::<LittleEndian>(LOG_TOMBSTONE)?;
         } else {
             cursor.write_u32::<LittleEndian>(self.value.len() as u32)?;
         }
@@ -242,8 +242,8 @@ impl<'a> CowEntry<'a> {
         Ok(())
     }
 
-    pub fn from_read<R: Read>(reader: &mut R) -> Result<CowEntry<'a>> {
-        let mut header = vec![0u8; ENTRY_STATIC_SIZE as usize];
+    pub fn from_read<R: Read>(reader: &mut R) -> Result<Log<'a>> {
+        let mut header = vec![0u8; LOG_STATIC_SIZE as usize];
         reader.read_exact(&mut header)?;
 
         let mut cursor = Cursor::new(header);
@@ -255,7 +255,7 @@ impl<'a> CowEntry<'a> {
         let mut key = vec![0u8; key_size as usize];
         reader.read_exact(&mut key)?;
 
-        let deleted = value_size == ENTRY_TOMBSTONE;
+        let deleted = value_size == LOG_TOMBSTONE;
 
         let value = if deleted {
             let empty: &[u8] = &[];
@@ -281,7 +281,7 @@ impl<'a> CowEntry<'a> {
             });
         }
 
-        Ok(CowEntry {
+        Ok(Log {
             key: Cow::from(key),
             value: value,
             seq: seq,
@@ -290,37 +290,37 @@ impl<'a> CowEntry<'a> {
     }
 }
 
-pub struct CowHint<'a> {
+pub struct CompactionHint<'a> {
     pub key: Cow<'a, [u8]>,
-    pub entry_pos: u64,
+    pub log_pos: u64,
     pub value_size: u32,
     pub seq: u64,
     pub deleted: bool,
 }
 
-impl<'a> CowHint<'a> {
-    pub fn new(e: &'a CowEntry, entry_pos: u64) -> CowHint<'a> {
-        CowHint {
+impl<'a> CompactionHint<'a> {
+    pub fn new(e: &'a Log, log_pos: u64) -> CompactionHint<'a> {
+        CompactionHint {
             key: Cow::from(&*e.key),
-            entry_pos: entry_pos,
+            log_pos: log_pos,
             value_size: e.value.len() as u32,
             seq: e.seq,
             deleted: e.deleted,
         }
     }
 
-    pub fn from(e: CowEntry<'a>, entry_pos: u64) -> CowHint<'a> {
-        CowHint {
+    pub fn from(e: Log<'a>, log_pos: u64) -> CompactionHint<'a> {
+        CompactionHint {
             key: e.key,
-            entry_pos: entry_pos,
+            log_pos: log_pos,
             value_size: e.value.len() as u32,
             seq: e.seq,
             deleted: e.deleted,
         }
     }
 
-    pub fn entry_size(&self) -> u64 {
-        ENTRY_STATIC_SIZE as u64 + self.key.len() as u64 + self.value_size as u64
+    pub fn log_size(&self) -> u64 {
+        LOG_STATIC_SIZE as u64 + self.key.len() as u64 + self.value_size as u64
     }
 
     pub fn write_bytes<W: Write>(&self, writer: &mut W) -> Result<()> {
@@ -328,34 +328,34 @@ impl<'a> CowHint<'a> {
         writer.write_u16::<LittleEndian>(self.key.len() as u16)?;
 
         if self.deleted {
-            writer.write_u32::<LittleEndian>(ENTRY_TOMBSTONE)?;
+            writer.write_u32::<LittleEndian>(LOG_TOMBSTONE)?;
         } else {
             writer.write_u32::<LittleEndian>(self.value_size)?;
         }
 
-        writer.write_u64::<LittleEndian>(self.entry_pos)?;
+        writer.write_u64::<LittleEndian>(self.log_pos)?;
         writer.write_all(&self.key)?;
 
         Ok(())
     }
 
-    pub fn from_read<R: Read>(reader: &mut R) -> Result<CowHint<'a>> {
+    pub fn from_read<R: Read>(reader: &mut R) -> Result<CompactionHint<'a>> {
         let seq = reader.read_u64::<LittleEndian>()?;
         let key_size = reader.read_u16::<LittleEndian>()?;
         let value_size = reader.read_u32::<LittleEndian>()?;
-        let entry_pos = reader.read_u64::<LittleEndian>()?;
+        let log_pos = reader.read_u64::<LittleEndian>()?;
 
         let mut key = vec![0u8; key_size as usize];
         reader.read_exact(&mut key)?;
 
-        let deleted = value_size == ENTRY_TOMBSTONE;
+        let deleted = value_size == LOG_TOMBSTONE;
 
-        Ok(CowHint {
+        Ok(CompactionHint {
             key: Cow::from(key),
-            entry_pos: entry_pos,
+            log_pos: log_pos,
             value_size: if deleted { 0 } else { value_size },
             seq: seq,
-            deleted: value_size == ENTRY_TOMBSTONE,
+            deleted: value_size == LOG_TOMBSTONE,
         })
     }
 }

@@ -15,14 +15,14 @@ use lazy_static::lazy_static;
 use log::{info, warn};
 use regex::Regex;
 
-use super::slot::{CowEntry, CowHint};
+use super::slot::{Log, CompactionHint};
 use super::error::{Error, Result};
 use super::chunk_queue::{ChunkQueue};
 use super::util::{human_readable_byte_count, get_file_handle};
 use super::xxhash::{XxHash32, xxhash32};
 
-const DATA_FILE_EXTENSION: &'static str = "crabe.data";
-const HINT_FILE_EXTENSION: &'static str = "crabe.hint";
+const DATA_FILE_EXTENSION: &'static str = "crabe.sst";
+const COMPACTION_FILE_EXTENSION: &'static str = "crabe.cpct";
 const LOCK_FILE_NAME: &'static str = "crabe.lock";
 
 pub struct Sequence(AtomicUsize);
@@ -49,7 +49,7 @@ pub struct Lsm {
 }
 
 impl Lsm {
-    pub fn open(
+    pub fn load(
         path: &str,
         create: bool,
         sync: bool,
@@ -128,15 +128,15 @@ impl Lsm {
         })
     }
 
-    pub fn hints<'a>(&self, file_id: u32) -> Result<Option<Hints<'a>>> {
-        let hint_file_path = get_hint_file_path(&self.path, file_id);
-        Ok(if is_valid_hint_file(&hint_file_path)? {
-            info!("Loading hint file: {:?}", hint_file_path);
-            let hint_file = get_file_handle(&hint_file_path, false)?;
-            let hint_file_size = hint_file.metadata()?.len();
+    pub fn compaction_hints<'a>(&self, file_id: u32) -> Result<Option<CompactionHints<'a>>> {
+        let compaction_file_path = get_compaction_hint_file_path(&self.path, file_id);
+        Ok(if is_valid_compaction_hint_file(&compaction_file_path)? {
+            info!("Loading compaction file: {:?}", compaction_file_path);
+            let compaction_file = get_file_handle(&compaction_file_path, false)?;
+            let compaction_file_size = compaction_file.metadata()?.len();
 
-            Some(Hints {
-                hint_file: hint_file.take(hint_file_size - 4),
+            Some(CompactionHints {
+                compaction_file: compaction_file.take(compaction_file_size - 4),
                 phantom: PhantomData,
             })
         } else {
@@ -144,20 +144,20 @@ impl Lsm {
         })
     }
 
-    pub fn recreate_hints<'a>(&mut self, file_id: u32) -> Result<RecreateHints<'a>> {
-        let hint_file_path = get_hint_file_path(&self.path, file_id);
-        warn!("Re-creating hint file: {:?}", hint_file_path);
+    pub fn update_compaction_hints<'a>(&mut self, file_id: u32) -> Result<RecreateHints<'a>> {
+        let compaction_file_path = get_compaction_hint_file_path(&self.path, file_id);
+        warn!("Re-creating compaction file: {:?}", compaction_file_path);
 
-        let hint_writer = HintWriter::new(&self.path, file_id)?;
+        let compaction_writer = CompactionHintWriter::new(&self.path, file_id)?;
         let entries = self.entries(file_id)?;
 
         Ok(RecreateHints {
-            hint_writer: hint_writer,
+            hint_writer: compaction_writer,
             entries: entries,
         })
     }
 
-    pub fn read_entry<'a>(&self, file_id: u32, entry_pos: u64) -> Result<CowEntry<'a>> {
+    pub fn read_log<'a>(&self, file_id: u32, log_pos: u64) -> Result<Log<'a>> {
         let mut data_file = self.file_chunk_queue
             .lock()
             .unwrap()
@@ -167,16 +167,16 @@ impl Lsm {
                 get_file_handle(&get_data_file_path(&self.path, file_id), false)
             })?;
 
-        data_file.seek(SeekFrom::Start(entry_pos))?;
-        let res = CowEntry::from_read(&mut data_file);
+        data_file.seek(SeekFrom::Start(log_pos))?;
+        let res = Log::from_read(&mut data_file);
 
         self.file_chunk_queue.lock().unwrap().put(file_id, data_file);
 
         res
     }
 
-    pub fn append_entry<'a>(&mut self, entry: &CowEntry<'a>) -> Result<(u32, u64)> {
-        Ok(match self.lsm_writer.write(entry)? {
+    pub fn append_log<'a>(&mut self, log: &Log<'a>) -> Result<(u32, u64)> {
+        Ok(match self.lsm_writer.write(log)? {
             LsmWrite::NewFile(file_id) => {
                 if let Some(active_file_id) = self.active_file_id {
                     self.add_file(active_file_id);
@@ -184,11 +184,11 @@ impl Lsm {
                 self.active_file_id = Some(file_id);
                 info!(
                     "New active data file {:?}",
-                    self.lsm_writer.entry_writer()?.data_file_path
+                    self.lsm_writer.log_writer()?.data_file_path
                 );
                 (file_id, 0)
             }
-            LsmWrite::Ok(entry_pos) => (self.active_file_id.unwrap(), entry_pos),
+            LsmWrite::Ok(log_pos) => (self.active_file_id.unwrap(), log_pos),
         })
     }
 
@@ -214,10 +214,10 @@ impl Lsm {
             self.files.remove(idx);
 
             let data_file_path = get_data_file_path(&self.path, file_id);
-            let hint_file_path = get_hint_file_path(&self.path, file_id);
+            let compaction_file_path = get_compaction_hint_file_path(&self.path, file_id);
 
             fs::remove_file(data_file_path)?;
-            let _ = fs::remove_file(hint_file_path);
+            let _ = fs::remove_file(compaction_file_path);
         }
 
         self.files.extend(new_files);
@@ -243,7 +243,7 @@ pub struct LsmWriter {
     sync: bool,
     max_file_size: usize,
     file_id_seq: Arc<Sequence>,
-    entry_writer: Option<EntryWriter>,
+    log_writer: Option<LogWriter>,
 }
 
 pub enum LsmWrite {
@@ -264,140 +264,140 @@ impl LsmWriter {
             sync: sync,
             max_file_size: max_file_size,
             file_id_seq: file_id_seq,
-            entry_writer: None,
+            log_writer: None,
         }
     }
 
-    fn entry_writer(&mut self) -> Result<&EntryWriter> {
-        if self.entry_writer.is_none() {
-            self.new_entry_writer()?;
+    fn log_writer(&mut self) -> Result<&LogWriter> {
+        if self.log_writer.is_none() {
+            self.new_log_writer()?;
         }
-        Ok(self.entry_writer.as_ref().unwrap())
+        Ok(self.log_writer.as_ref().unwrap())
     }
 
-    fn new_entry_writer(&mut self) -> Result<u32> {
+    fn new_log_writer(&mut self) -> Result<u32> {
         let file_id = self.file_id_seq.increment();
 
-        if self.entry_writer.is_some() {
+        if self.log_writer.is_some() {
             info!(
                 "Closed data file {:?}",
-                self.entry_writer.as_ref().unwrap().data_file_path
+                self.log_writer.as_ref().unwrap().data_file_path
             );
         }
 
-        self.entry_writer = Some(EntryWriter::new(&self.path, self.sync, file_id)?);
+        self.log_writer = Some(LogWriter::new(&self.path, self.sync, file_id)?);
         Ok(file_id)
     }
 
-    pub fn write(&mut self, entry: &CowEntry) -> Result<LsmWrite> {
-        Ok(if self.entry_writer.is_none() ||
-            self.entry_writer.as_ref().unwrap().data_file_pos + entry.size() >
+    pub fn write(&mut self, log: &Log) -> Result<LsmWrite> {
+        Ok(if self.log_writer.is_none() ||
+            self.log_writer.as_ref().unwrap().data_file_pos + log.size() >
             self.max_file_size as u64
         {
-            if self.entry_writer.is_some() {
+            if self.log_writer.is_some() {
                 info!(
                     "Data file {:?} reached file limit of {}",
-                    self.entry_writer.as_ref().unwrap().data_file_path,
+                    self.log_writer.as_ref().unwrap().data_file_path,
                     human_readable_byte_count(self.max_file_size, true)
                 );
             }
 
-            let file_id = self.new_entry_writer()?;
-            let entry_pos = self.entry_writer.as_mut().unwrap().write(entry)?;
+            let file_id = self.new_log_writer()?;
+            let log_pos = self.log_writer.as_mut().unwrap().write(log)?;
 
-            assert_eq!(entry_pos, 0);
+            assert_eq!(log_pos, 0);
 
             LsmWrite::NewFile(file_id)
         } else {
-            let entry_pos = self.entry_writer.as_mut().unwrap().write(entry)?;
-            LsmWrite::Ok(entry_pos)
+            let log_pos = self.log_writer.as_mut().unwrap().write(log)?;
+            LsmWrite::Ok(log_pos)
         })
     }
 
     pub fn sync(&self) -> Result<()> {
-        if let Some(ref writer) = self.entry_writer {
+        if let Some(ref writer) = self.log_writer {
             writer.data_file.sync_data()?
         }
         Ok(())
     }
 }
 
-pub struct EntryWriter {
+pub struct LogWriter {
     sync: bool,
     data_file_path: PathBuf,
     data_file: File,
     data_file_pos: u64,
-    hint_writer: HintWriter,
+    compaction_writer: CompactionHintWriter,
 }
 
-impl EntryWriter {
-    pub fn new(path: &Path, sync: bool, file_id: u32) -> Result<EntryWriter> {
+impl LogWriter {
+    pub fn new(path: &Path, sync: bool, file_id: u32) -> Result<LogWriter> {
         let data_file_path = get_data_file_path(path, file_id);
         let data_file = get_file_handle(&data_file_path, true)?;
 
         info!("Created new data file {:?}", data_file_path);
 
-        let hint_writer = HintWriter::new(path, file_id)?;
+        let compaction_writer = CompactionHintWriter::new(path, file_id)?;
 
-        Ok(EntryWriter {
+        Ok(LogWriter {
             sync: sync,
             data_file_path: data_file_path,
             data_file: data_file,
             data_file_pos: 0,
-            hint_writer: hint_writer,
+            compaction_writer: compaction_writer,
         })
     }
 
-    pub fn write<'a>(&mut self, entry: &CowEntry<'a>) -> Result<u64> {
-        let entry_pos = self.data_file_pos;
+    pub fn write<'a>(&mut self, log: &Log<'a>) -> Result<u64> {
+        let log_pos = self.data_file_pos;
 
-        let hint = CowHint::new(entry, entry_pos);
-        entry.write_bytes(&mut self.data_file)?;
+        let ch = CompactionHint::new(log, log_pos);
+        log.write_bytes(&mut self.data_file)?;
 
-        self.hint_writer.write(&hint)?;
+        self.compaction_writer.write(&ch)?;
 
         if self.sync {
             self.data_file.sync_data()?;
         }
 
-        self.data_file_pos += entry.size();
+        self.data_file_pos += log.size();
 
-        Ok(entry_pos)
+        Ok(log_pos)
     }
 }
 
-impl Drop for EntryWriter {
+impl Drop for LogWriter {
     fn drop(&mut self) {
         let _ = self.data_file.sync_data();
     }
 }
 
-struct HintWriter {
-    hint_file: File,
-    hint_file_hasher: XxHash32,
+struct CompactionHintWriter {
+    compaction_file: File,
+    compaction_file_hasher: XxHash32,
 }
 
-impl HintWriter {
-    pub fn new(path: &Path, file_id: u32) -> Result<HintWriter> {
-        let hint_file = get_file_handle(&get_hint_file_path(path, file_id), true)?;
+impl CompactionHintWriter {
+    pub fn new(path: &Path, file_id: u32) -> Result<CompactionHintWriter> {
+        let compaction_hint_file = get_file_handle(&get_compaction_hint_file_path(path, file_id), true)?;
 
-        Ok(HintWriter {
-            hint_file: hint_file,
-            hint_file_hasher: XxHash32::new(),
+        Ok(CompactionHintWriter {
+            compaction_file: compaction_hint_file,
+            compaction_file_hasher: XxHash32::new(),
         })
     }
 
-    pub fn write<'a>(&mut self, hint: &CowHint<'a>) -> Result<()> {
-        hint.write_bytes(&mut self.hint_file)?;
-        hint.write_bytes(&mut self.hint_file_hasher)?;
+    pub fn write<'a>(&mut self, ch: &CompactionHint<'a>) -> Result<()> {
+        ch.write_bytes(&mut self.compaction_file)?;
+        ch.write_bytes(&mut self.compaction_file_hasher)?;
         Ok(())
     }
 }
 
-impl Drop for HintWriter {
+impl Drop for CompactionHintWriter {
     fn drop(&mut self) {
-        let _ = self.hint_file.write_u32::<LittleEndian>(
-            self.hint_file_hasher.get(),
+        let _ = self.compaction_file.write_u32::<LittleEndian>(
+            self.compaction_file_hasher.get(),
         );
     }
 }
@@ -409,62 +409,62 @@ pub struct Entries<'a> {
 }
 
 impl<'a> Iterator for Entries<'a> {
-    type Item = (u64, Result<CowEntry<'a>>);
+    type Item = (u64, Result<Log<'a>>);
 
-    fn next(&mut self) -> Option<(u64, Result<CowEntry<'a>>)> {
+    fn next(&mut self) -> Option<(u64, Result<Log<'a>>)> {
         let limit = self.data_file.limit();
         if limit == 0 {
             None
         } else {
-            let entry = CowEntry::from_read(&mut self.data_file);
-            let entry_pos = self.data_file_pos;
+            let log = Log::from_read(&mut self.data_file);
+            let log_pos = self.data_file_pos;
 
             let read = limit - self.data_file.limit();
 
             self.data_file_pos += read;
 
-            let entry = match entry {
-                Ok(entry) => {
-                    assert_eq!(entry.size(), read);
-                    Ok(entry)
+            let log = match log {
+                Ok(log) => {
+                    assert_eq!(log.size(), read);
+                    Ok(log)
                 }
                 e => e,
             };
 
-            Some((entry_pos, entry))
+            Some((log_pos, log))
         }
     }
 }
 
-pub struct Hints<'a> {
-    hint_file: Take<File>,
+pub struct CompactionHints<'a> {
+    compaction_file: Take<File>,
     phantom: PhantomData<&'a ()>,
 }
 
-impl<'a> Iterator for Hints<'a> {
-    type Item = Result<CowHint<'a>>;
+impl<'a> Iterator for CompactionHints<'a> {
+    type Item = Result<CompactionHint<'a>>;
 
-    fn next(&mut self) -> Option<Result<CowHint<'a>>> {
-        if self.hint_file.limit() == 0 {
+    fn next(&mut self) -> Option<Result<CompactionHint<'a>>> {
+        if self.compaction_file.limit() == 0 {
             None
         } else {
-            Some(CowHint::from_read(&mut self.hint_file))
+            Some(CompactionHint::from_read(&mut self.compaction_file))
         }
     }
 }
 
 pub struct RecreateHints<'a> {
-    hint_writer: HintWriter,
+    hint_writer: CompactionHintWriter,
     entries: Entries<'a>,
 }
 
 impl<'a> Iterator for RecreateHints<'a> {
-    type Item = Result<CowHint<'a>>;
+    type Item = Result<CompactionHint<'a>>;
 
-    fn next(&mut self) -> Option<Result<CowHint<'a>>> {
+    fn next(&mut self) -> Option<Result<CompactionHint<'a>>> {
         self.entries.next().map(|e| {
-            let (entry_pos, entry) = e;
-            let hint = CowHint::from(entry?, entry_pos);
+            let (log_pos, log) = e;
+            let hint = CompactionHint::from(log?, log_pos);
             self.hint_writer.write(&hint)?;
             Ok(hint)
         })
@@ -482,9 +482,9 @@ fn get_data_file_path(path: &Path, file_id: u32) -> PathBuf {
     path.join(file_id).with_extension(DATA_FILE_EXTENSION)
 }
 
-fn get_hint_file_path(path: &Path, file_id: u32) -> PathBuf {
+fn get_compaction_hint_file_path(path: &Path, file_id: u32) -> PathBuf {
     let file_id = format!("{:010}", file_id);
-    path.join(file_id).with_extension(HINT_FILE_EXTENSION)
+    path.join(file_id).with_extension(COMPACTION_FILE_EXTENSION)
 }
 
 fn find_data_files(path: &Path) -> Result<Vec<u32>> {
@@ -516,13 +516,13 @@ fn find_data_files(path: &Path) -> Result<Vec<u32>> {
     Ok(data_files)
 }
 
-fn is_valid_hint_file(path: &Path) -> Result<bool> {
+fn is_valid_compaction_hint_file(path: &Path) -> Result<bool> {
     Ok(
         path.is_file() &&
             {
-                let mut hint_file = get_file_handle(path, false)?;
+                let mut compaction_hint_file = get_file_handle(path, false)?;
                 let mut buf = Vec::new();
-                hint_file.read_to_end(&mut buf)?;
+                compaction_hint_file.read_to_end(&mut buf)?;
 
                 buf.len() >= 4 &&
                     {

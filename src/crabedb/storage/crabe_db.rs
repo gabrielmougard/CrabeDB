@@ -12,7 +12,7 @@ use time;
 use log::{info, warn, debug};
 
 use super::options::{StorageOptions, SyncOptions};
-use super::slot::{MemIdx, MemIdxEntry, CowEntry, CowHint};
+use super::slot::{MemIdx, MemIdxEntry, Log, CompactionHint};
 use super::error::Result;
 use super::lsm::{Lsm, LsmWrite};
 use super::util::human_readable_byte_count;
@@ -26,22 +26,22 @@ pub struct CrabeDBinternal {
 impl CrabeDBinternal {
     fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
         let val = match self.idx.get(key) {
-            Some(idx_entry) => {
-                let entry = self.lsm.read_entry(
-                    idx_entry.file_id,
-                    idx_entry.pos,
+            Some(idx_log) => {
+                let log = self.lsm.read_log(
+                    idx_log.file_id,
+                    idx_log.pos,
                 )?;
-                if entry.deleted {
+                if log.deleted {
                     warn!(
-                        "Index pointed to dead entry: Entry {{ key: {:?}, sequence: {} }} at \
+                        "Index pointed to dead log: Log {{ key: {:?}, sequence: {} }} at \
                         file: {}",
-                        entry.key,
-                        entry.seq,
-                        idx_entry.file_id
+                        log.key,
+                        log.seq,
+                        idx_log.file_id
                     );
                     None
                 } else {
-                    Some(entry.value.into_owned())
+                    Some(log.value.into_owned())
                 }
             }
             _ => None,
@@ -51,27 +51,27 @@ impl CrabeDBinternal {
     }
 
     fn put(&mut self, key: Vec<u8>, value: &[u8]) -> Result<()> {
-        let idx_entry = {
-            let entry = CowEntry::new(self.current_seq, &*key, value)?;
-            let (file_id, file_pos) = self.lsm.append_entry(&entry)?;
+        let idx_log = {
+            let log = Log::new(self.current_seq, &*key, value)?;
+            let (file_id, file_pos) = self.lsm.append_log(&log)?;
             self.current_seq += 1;
 
             MemIdxEntry {
                 pos: file_pos,
-                seq: entry.seq,
-                size: entry.size(),
+                seq: log.seq,
+                size: log.size(),
                 file_id: file_id,
             }
         };
 
-        self.idx.set(key, idx_entry);
+        self.idx.set(key, idx_log);
         Ok(())
     }
 
     fn delete(&mut self, key: &[u8]) -> Result<()> {
         if self.idx.remove(key).is_some() {
-            let entry = CowEntry::deleted(self.current_seq, key);
-            self.lsm.append_entry(&entry)?;
+            let log = Log::deleted(self.current_seq, key);
+            self.lsm.append_log(&log)?;
             self.current_seq += 1;
         }
         Ok(())
@@ -92,9 +92,9 @@ pub struct CrabeDB {
 }
 
 impl CrabeDB {
-    pub fn open(path: &str, options: StorageOptions) -> Result<CrabeDB> {
-        info!("Opening key/value store: {:?}", &path);
-        let mut lsm = Lsm::open(
+    pub fn load(path: &str, options: StorageOptions) -> Result<CrabeDB> {
+        info!("loading key/value store: {:?}", &path);
+        let mut lsm = Lsm::load(
             path,
             options.create,
             options.sync == SyncOptions::Always,
@@ -106,28 +106,28 @@ impl CrabeDB {
         let mut seq = 0;
 
         for file_id in lsm.files() {
-            let mut update_idx_func = |hint: CowHint| {
-                if hint.seq > seq {
-                    seq = hint.seq;
+            let mut update_idx_func = |ch: CompactionHint| {
+                if ch.seq > seq {
+                    seq = ch.seq;
                 }
-                idx.update(hint, file_id);
+                idx.update(ch, file_id);
             };
 
-            match lsm.hints(file_id)? {
-                Some(hints) => {
-                    for hint in hints {
-                        update_idx_func(hint?);
+            match lsm.compaction_hints(file_id)? {
+                Some(chs) => {
+                    for ch in chs {
+                        update_idx_func(ch?);
                     }
                 }
                 None => {
-                    for hint in lsm.recreate_hints(file_id)? {
-                        update_idx_func(hint?);
+                    for ch in lsm.update_compaction_hints(file_id)? {
+                        update_idx_func(ch?);
                     }
                 }
             };
         }
 
-        info!("Opened key/value store: {:?}", &path);
+        info!("loaded key/value store: {:?}", &path);
         info!("Current sequence number: {:?}", seq);
 
         let crabe_db = CrabeDB {
@@ -202,7 +202,19 @@ impl CrabeDB {
         Ok(crabe_db)
     }
 
-    fn compact_files_aux(&self, files: &[u32]) -> Result<(Vec<u32>, Vec<u32>)> {
+    pub fn get<K: AsRef<[u8]>>(&self, key: K) -> Result<Option<Vec<u8>>> {
+        self.internal.read().unwrap().get(key.as_ref())
+    }
+
+    pub fn set<K: Into<Vec<u8>>, V: AsRef<[u8]>>(&self, key: K, value: V) -> Result<()> {
+        self.internal.write().unwrap().put(key.into(), value.as_ref())
+    }
+
+    pub fn remove<K: AsRef<[u8]>>(&self, key: K) -> Result<()> {
+        self.internal.write().unwrap().delete(key.as_ref())
+    }
+
+    fn compact_files_util(&self, files: &[u32]) -> Result<(Vec<u32>, Vec<u32>)> {
         let active_file_id = {
             self.internal.read().unwrap().lsm.active_file_id
         };
@@ -215,9 +227,9 @@ impl CrabeDB {
                     .read()
                     .unwrap()
                     .lsm
-                    .hints(file_id)
+                    .compaction_hints(file_id)
                     .ok()
-                    .and_then(|hints| hints.map(|h| (file_id, h)))
+                    .and_then(|compaction_hints| compaction_hints.map(|h| (file_id, h)))
             }
         });
 
@@ -229,34 +241,34 @@ impl CrabeDB {
             self.internal.read().unwrap().lsm.writer()
         };
 
-        for (file_id, hints) in compacted_files_hints {
+        for (file_id, compaction_hints) in compacted_files_hints {
             let mut inserts = Vec::new();
 
-            for hint in hints {
-                let hint = hint?;
+            for ch in compaction_hints {
+                let ch = ch?;
                 let internal = self.internal.read().unwrap();
-                let idx_entry = internal.idx.get(&*hint.key);
-                if hint.deleted {
-                    if idx_entry.is_none() {
-                        match deletes.entry(hint.key.to_vec()) {
+                let idx_log = internal.idx.get(&*ch.key);
+                if ch.deleted {
+                    if idx_log.is_none() {
+                        match deletes.entry(ch.key.to_vec()) {
                             HashMapEntry::Occupied(mut occupied) => {
-                                if *occupied.get() < hint.seq {
-                                    occupied.insert(hint.seq);
+                                if *occupied.get() < ch.seq {
+                                    occupied.insert(ch.seq);
                                 }
                             }
                             HashMapEntry::Vacant(entry) => {
-                                entry.insert(hint.seq);
+                                entry.insert(ch.seq);
                             }
                         }
                     }
-                } else if idx_entry.is_some() && idx_entry.unwrap().seq == hint.seq {
-                    inserts.push(hint)
+                } else if idx_log.is_some() && idx_log.unwrap().seq == ch.seq {
+                    inserts.push(ch)
                 }
             }
 
-            for hint in inserts {
+            for ch in inserts {
                 let lsm = &self.internal.read().unwrap().lsm;
-                let lsm_write = lsm_writer.write(&lsm.read_entry(file_id, hint.entry_pos)?)?;
+                let lsm_write = lsm_writer.write(&lsm.read_log(file_id, ch.log_pos)?)?;
 
                 if let LsmWrite::NewFile(file_id) = lsm_write {
                     new_files.push(file_id);
@@ -267,7 +279,7 @@ impl CrabeDB {
         }
 
         for (key, seq) in deletes {
-            lsm_writer.write(&CowEntry::deleted(seq, key))?;
+            lsm_writer.write(&Log::deleted(seq, key))?;
         }
 
         Ok((compacted_files, new_files))
@@ -275,16 +287,16 @@ impl CrabeDB {
 
     fn compact_files(&self, files: &[u32]) -> Result<()> {
         info!("Compacting data files: {:?}", files);
-        let (ref compacted_files, ref new_files) = self.compact_files_aux(files)?;
+        let (ref compacted_files, ref new_files) = self.compact_files_util(files)?;
         for &file_id in new_files {
-            let hints = {
-                self.internal.read().unwrap().lsm.hints(file_id)?
+            let compaction_hints = {
+                self.internal.read().unwrap().lsm.compaction_hints(file_id)?
             };
 
-            if let Some(hints) = hints {
-                for hint in hints {
-                    let hint = hint?;
-                    self.internal.write().unwrap().idx.update(hint, file_id);
+            if let Some(chs) = compaction_hints {
+                for ch in chs {
+                    let ch = ch?;
+                    self.internal.write().unwrap().idx.update(ch, file_id);
                 }
             };
         }
@@ -323,7 +335,7 @@ impl CrabeDB {
             if !triggered {
                 if fragmentation >= self.options.fragmentation_trigger {
                     info!(
-                        "File {} has fragmentation factor of {:.1}%, triggered compaction",
+                        "File {} has fragmentation factor of {:.1}%, compaction will start",
                         file_id,
                         fragmentation * 100.0
                     );
@@ -387,22 +399,6 @@ impl CrabeDB {
         }
 
         Ok(())
-    }
-
-    pub fn get<K: AsRef<[u8]>>(&self, key: K) -> Result<Option<Vec<u8>>> {
-        self.internal.read().unwrap().get(key.as_ref())
-    }
-
-    pub fn set<K: Into<Vec<u8>>, V: AsRef<[u8]>>(&self, key: K, value: V) -> Result<()> {
-        self.internal.write().unwrap().put(key.into(), value.as_ref())
-    }
-
-    pub fn remove<K: AsRef<[u8]>>(&self, key: K) -> Result<()> {
-        self.internal.write().unwrap().delete(key.as_ref())
-    }
-
-    pub fn keys(&self) -> Vec<Vec<u8>> {
-        self.internal.read().unwrap().keys().cloned().collect()
     }
 }
 

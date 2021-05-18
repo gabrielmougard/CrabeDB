@@ -1,0 +1,3 @@
+# Crabedb Telemetry
+
+**TODO** : Very optional but it would be useful to monitor this KV store in the future with a tool like Prometheus for example...
